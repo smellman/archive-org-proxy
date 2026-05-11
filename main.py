@@ -1,3 +1,24 @@
+"""archive-org-proxy: archive.org 向けのシンプルなプロキシサーバー。
+
+エンドポイント:
+    GET /proxy/{host}/{path}
+        host は ``archive.org`` で終わるホスト名のみ許可。
+        Range ヘッダーは透過的に転送される。
+
+起動方法:
+    Docker Compose:
+        docker compose up -d              # ホストの 18080 ポートで待受
+    Docker:
+        docker build -t archive-org-proxy .
+        docker run -p 18080:80 archive-org-proxy
+    ローカル開発 (uv が必要):
+        uv sync
+        uv run fastapi dev main.py
+
+使用例:
+    curl http://localhost:18080/proxy/archive.org/details/example
+"""
+
 from contextlib import asynccontextmanager
 import logging
 from fastapi import HTTPException, FastAPI, Request, Response
@@ -48,7 +69,7 @@ async def proxy(full_path: str, request:Request,  response: Response):
     if len(parts) < 2:
         raise HTTPException(status_code=400, detail="Invalid path format. Expected format: '{host}/{path}'")
     host, sub_path = parts[0], parts[1]
-    if not host.endswith('archive.org'):
+    if host != 'archive.org' and not host.endswith('.archive.org'):
         raise HTTPException(status_code=403, detail="Host not allowed")
     
     target_url = f"https://{host}/{sub_path}"

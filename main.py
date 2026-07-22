@@ -21,7 +21,7 @@
 
 from contextlib import asynccontextmanager
 import logging
-from fastapi import HTTPException, FastAPI, Request, Response
+from fastapi import HTTPException, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from starlette.responses import StreamingResponse
@@ -64,14 +64,14 @@ async def add_logging(request: Request, call_next):
     return response
 
 @app.get("/proxy/{full_path:path}")
-async def proxy(full_path: str, request:Request,  response: Response):
+async def proxy(full_path: str, request: Request):
     parts = full_path.split('/', 1)
     if len(parts) < 2:
         raise HTTPException(status_code=400, detail="Invalid path format. Expected format: '{host}/{path}'")
     host, sub_path = parts[0], parts[1]
     if host != 'archive.org' and not host.endswith('.archive.org'):
         raise HTTPException(status_code=403, detail="Host not allowed")
-    
+
     target_url = f"https://{host}/{sub_path}"
     headers = {}
 
@@ -80,20 +80,32 @@ async def proxy(full_path: str, request:Request,  response: Response):
     if range_header:
         headers['Range'] = range_header
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        res = await client.get(target_url, headers=headers)
+    # レスポンスボディはストリーミングで転送する。
+    # client.get() だとボディ全体を読み切るまで待つため、大きなファイルでは
+    # read タイムアウトに達して httpx.ReadTimeout で 500 になる。
+    # connect のみ短めにし、read タイムアウトは無効化する。
+    timeout = httpx.Timeout(10.0, read=None)
+    client = httpx.AsyncClient(follow_redirects=True, timeout=timeout)
 
-        if res.status_code == 302 and "location" in res.headers:
-            redirect_url = res.headers["location"]
-            res = await client.get(redirect_url, headers=headers)
-        
-        response_headers = {
-            "Content-Type": res.headers.get("content-type", "application/octet-stream"),
-            "Content-Length": res.headers.get("content-length", ""),
-        }
-        if "content-range" in res.headers:
-            response_headers["Content-Range"] = res.headers["content-range"]
-        if "accept-ranges" in res.headers:
-            response_headers["Accept-Ranges"] = res.headers["accept-ranges"]
+    req = client.build_request("GET", target_url, headers=headers)
+    res = await client.send(req, stream=True)
 
-        return StreamingResponse(res.aiter_bytes(), status_code=res.status_code, headers=response_headers)
+    response_headers = {
+        "Content-Type": res.headers.get("content-type", "application/octet-stream"),
+    }
+    if "content-length" in res.headers:
+        response_headers["Content-Length"] = res.headers["content-length"]
+    if "content-range" in res.headers:
+        response_headers["Content-Range"] = res.headers["content-range"]
+    if "accept-ranges" in res.headers:
+        response_headers["Accept-Ranges"] = res.headers["accept-ranges"]
+
+    async def body():
+        try:
+            async for chunk in res.aiter_bytes():
+                yield chunk
+        finally:
+            await res.aclose()
+            await client.aclose()
+
+    return StreamingResponse(body(), status_code=res.status_code, headers=response_headers)
